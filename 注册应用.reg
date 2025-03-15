@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\Microsoft\Edge\NativeMessagingHosts\page_content_native_host]
+@="F:\\Backup\\Downloads\\webextensions-examples-main\\webextensions-examples-main\\native-messaging\\app\\manifest.json"
+
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Edge\NativeMessagingHosts\page_content_native_host]
+@="F:\\Backup\\Downloads\\webextensions-examples-main\\webextensions-examples-main\\native-messaging\\app\\manifest.json" 

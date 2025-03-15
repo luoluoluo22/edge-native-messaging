@@ -1,0 +1,17 @@
+{ 
+    "name": "FastRun",
+    "version": "1.0.1",
+    "description": "Launch APP",
+    "background": {
+        "scripts": ["background.js"]
+    },
+    "content_scripts": [
+        { 
+            "matches": ["http://*/*", "https://*/*", "ftp://*/*", "file://*/*"],
+            "js": ["content.js"]
+        }
+    ],
+    "permissions": ["nativeMessaging", "tabs"],
+    "minimum_chrome_version": "6.0.0.0",
+    "manifest_version": 2
+}

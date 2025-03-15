@@ -1,0 +1,38 @@
+<html>
+<style>
+  .message {
+    width: 500px;
+    height: 500px;
+    background-color: pink;
+  }
+ 
+  h3 {
+    background-color: red;
+  }
+</style>
+ 
+<head>
+  <script>
+    function startApp(i) {
+      //创建CustomEvent事件
+      var eventName = "myCustomEvent" + i;
+      var evt = document.createEvent("CustomEvent");
+      evt.initCustomEvent(eventName, true, false, "用户点击了按钮" + i);
+      //执行自定义事件
+      document.dispatchEvent(evt);
+    }
+  </script>
+</head>
+ 
+<body>
+ 
+  <button type="button" onClick="startApp(1)" id="startApp">按钮1</button>
+  <button type="button" onClick="startApp(2)" id="startApp">按钮2</button>
+  <button type="button" onClick="startApp(3)" id="startApp">按钮3</button>
+  <button type="button" onClick="startApp(4)" id="startApp">按钮4</button>
+  <div class="message">
+    <h1 class="jieshou">接收到的消息：</h1>
+  </div>
+</body>
+ 
+</html>
