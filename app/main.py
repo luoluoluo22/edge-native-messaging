@@ -203,8 +203,34 @@ sse = SseServerTransport("/messages/")
 
 # 定义SSE处理函数
 async def handle_sse(request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
-        await mcp._mcp_server.run(read_stream, write_stream, mcp._mcp_server.create_initialization_options())
+    try:
+        sse_logger.info("收到新的SSE连接请求")
+        
+        # 记录请求信息
+        client_info = {
+            "ip": request.client.host if hasattr(request, "client") and hasattr(request.client, "host") else "未知",
+            "user_agent": request.headers.get("user-agent", "未知"),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        sse_logger.info(f"客户端信息: {json.dumps(client_info, ensure_ascii=False)}")
+        
+        # 建立SSE连接
+        async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
+            sse_logger.info("SSE连接已建立")
+            
+            # 不直接发送欢迎消息，让MCP服务器处理通信
+            try:
+                # 运行MCP服务器
+                await mcp._mcp_server.run(read_stream, write_stream, mcp._mcp_server.create_initialization_options())
+            except Exception as e:
+                sse_logger.error(f"MCP服务器运行出错: {str(e)}")
+                # 不抛出异常，让连接正常关闭
+            
+        sse_logger.info("SSE连接已关闭")
+        return Response(status_code=200)
+    except Exception as e:
+        sse_logger.error(f"SSE连接处理出错: {str(e)}")
+        return Response(status_code=500)
 
 # 创建路由
 routes = [
@@ -228,14 +254,51 @@ def send_notification(message: str) -> Dict:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        # 通过标准输出发送消息
+        # 通过标准输出发送消息到插件
         encoded_msg = encode_message(notification)
         if not encoded_msg:
             error_msg = "消息编码失败"
             sse_logger.error(error_msg)
             return {"status": "error", "message": error_msg}
             
-        if send_message(encoded_msg):
+        send_result = send_message(encoded_msg)
+        
+        # 同时通过SSE发送消息
+        try:
+            sse_logger.info(f"通过SSE发送消息: {message}")
+            
+            # 创建一个线程来运行异步广播函数
+            def run_broadcast():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # 使用更简单的消息格式
+                    sse_message = {
+                        "jsonrpc": "2.0", 
+                        "method": "notification", 
+                        "params": {
+                            "type": "notification",
+                            "content": message,
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                    }
+                    loop.run_until_complete(sse.broadcast(json.dumps(sse_message)))
+                    sse_logger.info("SSE消息广播成功")
+                except Exception as e:
+                    sse_logger.error(f"SSE广播执行失败: {str(e)}")
+                finally:
+                    loop.close()
+            
+            # 启动线程
+            broadcast_thread = threading.Thread(target=run_broadcast)
+            broadcast_thread.daemon = True
+            broadcast_thread.start()
+            
+        except Exception as e:
+            sse_logger.error(f"SSE消息发送失败: {str(e)}")
+            # 即使SSE发送失败，只要标准输出发送成功，我们仍然认为消息发送成功
+        
+        if send_result:
             return {"status": "success", "message": "消息已发送"}
         else:
             return {"status": "error", "message": "消息发送失败"}
@@ -294,10 +357,24 @@ def start_sse_server():
         sys.stderr = original_stderr
         
         sse_logger.info("SSE服务器正在启动...")
-        server.run()
+        
+        # 使用异步方式运行服务器
+        try:
+            asyncio.run(server.serve())
+        except RuntimeError as e:
+            if "asyncio.run() cannot be called from a running event loop" in str(e):
+                # 如果已经在事件循环中，使用不同的方法启动
+                sse_logger.warning("检测到已有事件循环，使用替代方法启动服务器")
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(server.serve())
+            else:
+                raise
         
     except Exception as e:
         sse_logger.error(f"SSE服务器启动失败: {str(e)}")
+        # 记录详细的异常信息
+        import traceback
+        sse_logger.error(f"异常详情: {traceback.format_exc()}")
         raise
     finally:
         sse_logger.info("SSE服务器已停止")
@@ -349,9 +426,13 @@ def main():
             sys.stderr = original_stderr
             
             # 启动SSE服务器线程
+            sse_logger.info("正在启动SSE服务器线程...")
             server_thread = threading.Thread(target=start_sse_server, daemon=True)
             server_thread.start()
-            time.sleep(2)  # 等待服务器启动
+            
+            # 等待服务器启动
+            sse_logger.info("等待SSE服务器启动...")
+            time.sleep(2)
             
             # 发送启动消息
             startup_message = {
