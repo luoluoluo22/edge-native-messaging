@@ -7,7 +7,7 @@
     },
     "content_scripts": [
         { 
-            "matches": ["http://*/*", "https://*/*", "ftp://*/*", "file://*/*"],
+            "matches": ["http://*/*", "https://*/*", "ftp://*/*", "file://*/*", "http://localhost:*/*"],
             "js": ["content.js"]
         }
     ],

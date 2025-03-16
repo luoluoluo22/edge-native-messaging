@@ -6,7 +6,6 @@ import atexit
 import threading
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
-from mcp.server.sse import SseServerTransport
 import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
@@ -16,8 +15,11 @@ import os
 from logging.handlers import RotatingFileHandler
 import signal
 import asyncio
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import Response, JSONResponse
 from starlette.background import BackgroundTask
+import uuid
+import re
+import html2text
 
 # 配置日志
 def setup_logger():
@@ -39,10 +41,10 @@ def setup_logger():
         encoding='utf-8'
     )
     
-    # 创建一个专门用于SSE服务的文件处理器
-    sse_log_file = os.path.join(log_dir, 'sse_service.log')
-    sse_file_handler = RotatingFileHandler(
-        sse_log_file,
+    # 创建一个专门用于API服务的文件处理器
+    api_log_file = os.path.join(log_dir, 'api_service.log')
+    api_file_handler = RotatingFileHandler(
+        api_log_file,
         maxBytes=1024*1024,  # 1MB
         backupCount=5,
         encoding='utf-8'
@@ -57,20 +59,20 @@ def setup_logger():
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     file_handler.addFilter(QuietFilter())  # 添加过滤器
-    sse_file_handler.setFormatter(formatter)
+    api_file_handler.setFormatter(formatter)
     
     # 添加处理器到记录器
     logger.addHandler(file_handler)
     
-    # 创建SSE专用记录器
-    sse_logger = logging.getLogger('sse')
-    sse_logger.setLevel(logging.DEBUG)
-    sse_logger.addHandler(sse_file_handler)
+    # 创建API专用记录器
+    api_logger = logging.getLogger('api')
+    api_logger.setLevel(logging.DEBUG)
+    api_logger.addHandler(api_file_handler)
     
-    return logger, sse_logger
+    return logger, api_logger
 
 # 创建日志记录器
-logger, sse_logger = setup_logger()
+logger, api_logger = setup_logger()
 
 # 创建MCP服务器实例
 mcp = FastMCP("本地消息推送服务")
@@ -198,55 +200,61 @@ def send_exit_message():
         logger.error(f"发送退出消息时出错: {str(e)}")
         print(f"发送退出消息时出错: {str(e)}", file=sys.stderr)
 
-# 创建SSE传输层
-sse = SseServerTransport("/messages/")
+# 全局回调字典
+callbacks = {}
 
-# 定义SSE处理函数
-async def handle_sse(request):
+# 全局存储字典，用于存储页面源码及转换结果
+page_sources = {}
+
+# 转换HTML为Markdown
+def convert_html_to_markdown(html_content):
+    """将HTML内容转换为Markdown格式"""
     try:
-        sse_logger.info("收到新的SSE连接请求")
+        # 创建html2text转换器实例
+        converter = html2text.HTML2Text()
+        # 配置转换器
+        converter.ignore_links = False
+        converter.ignore_images = False
+        converter.body_width = 0  # 不限制宽度
+        converter.protect_links = True  # 保护链接
+        converter.unicode_snob = True  # 正确处理Unicode字符
+        converter.single_line_break = True  # 使用单行换行
         
-        # 记录请求信息
-        client_info = {
-            "ip": request.client.host if hasattr(request, "client") and hasattr(request.client, "host") else "未知",
-            "user_agent": request.headers.get("user-agent", "未知"),
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        sse_logger.info(f"客户端信息: {json.dumps(client_info, ensure_ascii=False)}")
+        # 转换HTML为Markdown
+        markdown = converter.handle(html_content)
         
-        # 建立SSE连接
-        async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
-            sse_logger.info("SSE连接已建立")
-            
-            # 不直接发送欢迎消息，让MCP服务器处理通信
-            try:
-                # 运行MCP服务器
-                await mcp._mcp_server.run(read_stream, write_stream, mcp._mcp_server.create_initialization_options())
-            except Exception as e:
-                sse_logger.error(f"MCP服务器运行出错: {str(e)}")
-                # 不抛出异常，让连接正常关闭
-            
-        sse_logger.info("SSE连接已关闭")
-        return Response(status_code=200)
+        # 一些简单的清理
+        # 减少多余空行
+        markdown = re.sub(r'\n{3,}', '\n\n', markdown)
+        
+        return markdown
     except Exception as e:
-        sse_logger.error(f"SSE连接处理出错: {str(e)}")
-        return Response(status_code=500)
+        api_logger.error(f"HTML转Markdown转换失败: {str(e)}")
+        return f"转换失败: {str(e)}"
 
-# 创建路由
-routes = [
-    Route("/sse", endpoint=handle_sse),
-    Mount("/messages/", app=sse.handle_post_message),
-]
+# HTTP处理函数
+async def handle_index(request):
+    """首页"""
+    return JSONResponse({
+        "message": "本地消息推送服务已启动",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "endpoints": {
+            "发送通知": "/api/send-notification",
+            "获取页面源码": "/api/get-page-source"
+        }
+    })
 
-# 修改send_notification函数
-@mcp.tool()
-def send_notification(message: str) -> Dict:
-    """发送通知消息到Chrome插件"""
+async def handle_send_notification(request):
+    """处理发送通知请求"""
     try:
+        body = await request.json()
+        message = body.get("message")
+        
         if not message or not isinstance(message, str):
-            error_msg = "消息内容无效"
-            sse_logger.error(error_msg)
-            return {"status": "error", "message": error_msg}
+            return JSONResponse({
+                "status": "error",
+                "message": "消息内容无效"
+            }, status_code=400)
             
         notification = {
             "type": "notification",
@@ -257,60 +265,262 @@ def send_notification(message: str) -> Dict:
         # 通过标准输出发送消息到插件
         encoded_msg = encode_message(notification)
         if not encoded_msg:
-            error_msg = "消息编码失败"
-            sse_logger.error(error_msg)
-            return {"status": "error", "message": error_msg}
+            return JSONResponse({
+                "status": "error",
+                "message": "消息编码失败"
+            }, status_code=500)
             
         send_result = send_message(encoded_msg)
         
-        # 同时通过SSE发送消息
-        try:
-            sse_logger.info(f"通过SSE发送消息: {message}")
-            
-            # 创建一个线程来运行异步广播函数
-            def run_broadcast():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    # 使用更简单的消息格式
-                    sse_message = {
-                        "jsonrpc": "2.0", 
-                        "method": "notification", 
-                        "params": {
-                            "type": "notification",
-                            "content": message,
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                    }
-                    loop.run_until_complete(sse.broadcast(json.dumps(sse_message)))
-                    sse_logger.info("SSE消息广播成功")
-                except Exception as e:
-                    sse_logger.error(f"SSE广播执行失败: {str(e)}")
-                finally:
-                    loop.close()
-            
-            # 启动线程
-            broadcast_thread = threading.Thread(target=run_broadcast)
-            broadcast_thread.daemon = True
-            broadcast_thread.start()
-            
-        except Exception as e:
-            sse_logger.error(f"SSE消息发送失败: {str(e)}")
-            # 即使SSE发送失败，只要标准输出发送成功，我们仍然认为消息发送成功
-        
         if send_result:
-            return {"status": "success", "message": "消息已发送"}
+            return JSONResponse({
+                "status": "success",
+                "message": "消息已发送"
+            })
         else:
-            return {"status": "error", "message": "消息发送失败"}
+            return JSONResponse({
+                "status": "error",
+                "message": "消息发送失败"
+            }, status_code=500)
             
     except Exception as e:
         error_msg = f"发送消息时出错: {str(e)}"
-        sse_logger.error(error_msg)
-        return {"status": "error", "message": error_msg}
+        api_logger.error(error_msg)
+        return JSONResponse({
+            "status": "error",
+            "message": error_msg
+        }, status_code=500)
+
+async def handle_get_page_source(request):
+    """处理获取页面源码请求"""
+    try:
+        body = await request.json()
+        request_id = body.get("request_id")
+        
+        if not request_id:
+            request_id = f"req_{uuid.uuid4().hex[:8]}"
+            
+        api_logger.info(f"收到获取页面源码请求，ID: {request_id}")
+        
+        # 创建请求消息
+        request_message = {
+            "type": "get_page_source",
+            "request_id": request_id,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # 创建事件用于等待响应
+        response_event = threading.Event()
+        response_data = {"response": None}
+        
+        # 定义回调函数
+        def handle_response(message):
+            if isinstance(message, dict) and message.get("request_id") == request_id:
+                response_data["response"] = message
+                response_event.set()
+        
+        # 注册回调
+        callbacks[request_id] = handle_response
+        
+        # 通过标准输出发送消息到插件
+        encoded_msg = encode_message(request_message)
+        if not encoded_msg:
+            return JSONResponse({
+                "status": "error",
+                "message": "请求消息编码失败",
+                "request_id": request_id
+            }, status_code=500)
+            
+        send_result = send_message(encoded_msg)
+        
+        if not send_result:
+            return JSONResponse({
+                "status": "error", 
+                "message": "页面源码请求发送失败", 
+                "request_id": request_id
+            }, status_code=500)
+        
+        # 创建一个后台任务来处理长时间等待的响应
+        def wait_for_response():
+            try:
+                # 等待响应，最多等待30秒
+                if response_event.wait(30):
+                    response = response_data["response"]
+                    # 处理响应，可以保存到文件或执行其他操作
+                    api_logger.info(f"收到页面源码响应，ID: {request_id}, URL: {response.get('url', '未知')}, 源码长度: {len(response.get('source_code', ''))}")
+                else:
+                    api_logger.error(f"等待页面源码响应超时，ID: {request_id}")
+            except Exception as e:
+                api_logger.error(f"处理页面源码响应时出错: {str(e)}")
+            finally:
+                # 清理回调
+                if request_id in callbacks:
+                    del callbacks[request_id]
+                    
+        # 启动后台线程
+        bg_thread = threading.Thread(target=wait_for_response)
+        bg_thread.daemon = True
+        bg_thread.start()
+        
+        # 立即返回请求已接收的响应
+        return JSONResponse({
+            "status": "pending",
+            "message": "页面源码请求已发送，等待响应",
+            "request_id": request_id
+        })
+            
+    except Exception as e:
+        error_msg = f"请求页面源码时出错: {str(e)}"
+        api_logger.error(error_msg)
+        return JSONResponse({
+            "status": "error",
+            "message": error_msg
+        }, status_code=500)
+
+async def handle_page_source_result(request):
+    """获取页面源码结果"""
+    try:
+        body = await request.json()
+        request_id = body.get("request_id")
+        
+        if not request_id:
+            return JSONResponse({
+                "status": "error",
+                "message": "缺少请求ID"
+            }, status_code=400)
+            
+        # 检查是否有结果可用
+        if request_id in callbacks:
+            return JSONResponse({
+                "status": "pending",
+                "message": "页面源码请求仍在处理中"
+            })
+        else:
+            # 检查是否已有结果保存
+            # 此处可以从某个存储中检索结果
+            return JSONResponse({
+                "status": "completed",
+                "message": "页面源码请求已完成，但结果不可用"
+            })
+            
+    except Exception as e:
+        error_msg = f"获取页面源码结果时出错: {str(e)}"
+        api_logger.error(error_msg)
+        return JSONResponse({
+            "status": "error",
+            "message": error_msg
+        }, status_code=500)
+
+async def handle_get_markdown(request):
+    """获取页面源码的Markdown格式"""
+    try:
+        body = await request.json()
+        request_id = body.get("request_id")
+        
+        if not request_id:
+            return JSONResponse({
+                "status": "error",
+                "message": "缺少请求ID"
+            }, status_code=400)
+            
+        # 检查是否有结果可用
+        if request_id in page_sources:
+            page_data = page_sources[request_id]
+            
+            # 检查是否已经有转换过的markdown
+            if "markdown" not in page_data:
+                # 如果没有转换过，就现在转换
+                html_content = page_data.get("source_code", "")
+                if html_content:
+                    markdown = convert_html_to_markdown(html_content)
+                    page_data["markdown"] = markdown
+                    page_data["markdown_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    return JSONResponse({
+                        "status": "error",
+                        "message": "页面源码为空，无法转换"
+                    }, status_code=400)
+            
+            # 返回markdown结果
+            return JSONResponse({
+                "status": "success",
+                "message": "成功获取Markdown内容",
+                "request_id": request_id,
+                "url": page_data.get("url", "unknown"),
+                "markdown_length": len(page_data["markdown"]),
+                "markdown_time": page_data.get("markdown_time"),
+                "markdown": page_data["markdown"]
+            })
+        else:
+            return JSONResponse({
+                "status": "error",
+                "message": "找不到指定请求ID的页面源码",
+                "request_id": request_id
+            }, status_code=404)
+            
+    except Exception as e:
+        error_msg = f"获取Markdown结果时出错: {str(e)}"
+        api_logger.error(error_msg)
+        return JSONResponse({
+            "status": "error",
+            "message": error_msg
+        }, status_code=500)
+
+# 处理从插件返回的页面源码
+def handle_page_source_response(message):
+    """处理从插件返回的页面源码"""
+    try:
+        if not isinstance(message, dict):
+            api_logger.error("页面源码响应格式无效")
+            return False
+            
+        request_id = message.get("request_id")
+        source_code = message.get("source_code")
+        url = message.get("url", "未知URL")
+        
+        if not request_id or not source_code:
+            api_logger.error("页面源码响应缺少必要字段")
+            return False
+            
+        api_logger.info(f"收到页面源码响应，ID: {request_id}, URL: {url}, 源码长度: {len(source_code)}")
+        
+        # 保存页面源码到全局存储中
+        page_sources[request_id] = {
+            "url": url,
+            "source_code": source_code,
+            "received_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # 预先转换为Markdown（在后台线程中进行）
+        def convert_in_background():
+            try:
+                markdown = convert_html_to_markdown(source_code)
+                page_sources[request_id]["markdown"] = markdown
+                page_sources[request_id]["markdown_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                api_logger.info(f"页面源码已转换为Markdown，ID: {request_id}, Markdown长度: {len(markdown)}")
+            except Exception as e:
+                api_logger.error(f"后台转换Markdown时出错: {str(e)}")
+        
+        # 启动转换线程
+        convert_thread = threading.Thread(target=convert_in_background)
+        convert_thread.daemon = True
+        convert_thread.start()
+        
+        # 调用回调函数
+        if request_id in callbacks:
+            callbacks[request_id](message)
+            return True
+        else:
+            api_logger.warning(f"收到页面源码响应，但没有对应的回调函数，ID: {request_id}")
+            return False
+        
+    except Exception as e:
+        api_logger.error(f"处理页面源码响应时出错: {str(e)}")
+        return False
 
 def graceful_shutdown(signum, frame):
     """优雅关闭服务器"""
-    sse_logger.info("收到关闭信号，开始优雅关闭...")
+    api_logger.info("收到关闭信号，开始优雅关闭...")
     
     try:
         # 发送退出消息
@@ -321,7 +531,7 @@ def graceful_shutdown(signum, frame):
         }
         send_message(encode_message(exit_message))
     except Exception as e:
-        sse_logger.error(f"发送关闭消息失败: {str(e)}")
+        api_logger.error(f"发送关闭消息失败: {str(e)}")
     
     # 等待一段时间让消息发送完成
     time.sleep(2)
@@ -329,11 +539,20 @@ def graceful_shutdown(signum, frame):
     # 关闭服务器
     sys.exit(0)
 
+# 创建路由
+routes = [
+    Route("/", endpoint=handle_index),
+    Route("/api/send-notification", endpoint=handle_send_notification, methods=["POST"]),
+    Route("/api/get-page-source", endpoint=handle_get_page_source, methods=["POST"]),
+    Route("/api/page-source-result", endpoint=handle_page_source_result, methods=["POST"]),
+    Route("/api/get-markdown", endpoint=handle_get_markdown, methods=["POST"]),
+]
+
 # 创建Starlette应用
 app = Starlette(routes=routes)
 
-def start_sse_server():
-    """启动SSE服务器"""
+def start_api_server():
+    """启动API服务器"""
     try:
         # 保存原始的标准输出流
         original_stdout = sys.stdout
@@ -356,7 +575,7 @@ def start_sse_server():
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         
-        sse_logger.info("SSE服务器正在启动...")
+        api_logger.info("API服务器正在启动...")
         
         # 使用异步方式运行服务器
         try:
@@ -364,43 +583,159 @@ def start_sse_server():
         except RuntimeError as e:
             if "asyncio.run() cannot be called from a running event loop" in str(e):
                 # 如果已经在事件循环中，使用不同的方法启动
-                sse_logger.warning("检测到已有事件循环，使用替代方法启动服务器")
+                api_logger.warning("检测到已有事件循环，使用替代方法启动服务器")
                 loop = asyncio.get_event_loop()
                 loop.run_until_complete(server.serve())
             else:
                 raise
         
     except Exception as e:
-        sse_logger.error(f"SSE服务器启动失败: {str(e)}")
+        api_logger.error(f"API服务器启动失败: {str(e)}")
         # 记录详细的异常信息
         import traceback
-        sse_logger.error(f"异常详情: {traceback.format_exc()}")
+        api_logger.error(f"异常详情: {traceback.format_exc()}")
         raise
     finally:
-        sse_logger.info("SSE服务器已停止")
+        api_logger.info("API服务器已停止")
 
 @mcp.resource("message://help")
 def get_help() -> str:
     """提供消息推送服务的使用说明"""
     return """
     这是一个本地消息推送服务，提供以下功能：
-    1. send_notification(message): 发送通知消息到Chrome插件
+    1. 发送通知消息到Chrome插件
+    2. 获取当前浏览器页面的源码
     
     使用方法：
-    1. 通过SSE连接接收消息：
-       - 连接到 http://localhost:8888/sse
-       
-    2. 发送消息：
-       - 发送POST请求到 http://localhost:8888/messages/
-       
-    消息格式：
+    1. 通过HTTP API接收消息：
+       - 首页信息: GET http://localhost:8888/
+       - 发送通知: POST http://localhost:8888/api/send-notification
+       - 获取页面源码: POST http://localhost:8888/api/get-page-source
+       - 获取页面源码结果: POST http://localhost:8888/api/page-source-result
+       - 获取Markdown格式内容: POST http://localhost:8888/api/get-markdown
+    
+    消息格式:
+    发送通知:
     {
-        "method": "send_notification",
-        "params": {
-            "message": "你的消息内容"
-        }
+        "message": "你的消息内容"
+    }
+    
+    获取页面源码:
+    {
+        "request_id": "可选，请求ID"
+    }
+    
+    获取Markdown:
+    {
+        "request_id": "必填，请求ID"
     }
     """
+
+# 添加获取页面源码的工具函数
+@mcp.tool()
+def get_page_source(request_id: str = None) -> Dict:
+    """请求获取当前浏览器页面的源码"""
+    try:
+        if not request_id:
+            request_id = f"req_{int(time.time())}"
+            
+        api_logger.info(f"收到获取页面源码请求(从MCP工具)，ID: {request_id}")
+        
+        # 创建请求消息
+        request_message = {
+            "type": "get_page_source",
+            "request_id": request_id,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # 创建事件用于等待响应
+        response_event = threading.Event()
+        response_data = {"response": None}
+        
+        # 定义回调函数
+        def handle_response(message):
+            if isinstance(message, dict) and message.get("request_id") == request_id:
+                response_data["response"] = message
+                response_event.set()
+        
+        # 注册回调
+        callbacks[request_id] = handle_response
+        
+        # 通过标准输出发送消息到插件
+        encoded_msg = encode_message(request_message)
+        if not encoded_msg:
+            error_msg = "请求消息编码失败"
+            api_logger.error(error_msg)
+            return {"status": "error", "message": error_msg, "request_id": request_id}
+            
+        send_result = send_message(encoded_msg)
+        
+        if not send_result:
+            return {
+                "status": "error", 
+                "message": "页面源码请求发送失败", 
+                "request_id": request_id
+            }
+        
+        # 等待响应，最多等待30秒
+        if response_event.wait(30):
+            response = response_data["response"]
+            return {
+                "status": "success",
+                "message": "成功获取页面源码",
+                "request_id": request_id,
+                "url": response.get("url", "unknown"),
+                "source_code": response.get("source_code", "")
+            }
+        else:
+            return {
+                "status": "timeout",
+                "message": "等待页面源码响应超时",
+                "request_id": request_id
+            }
+            
+    except Exception as e:
+        error_msg = f"请求页面源码时出错: {str(e)}"
+        api_logger.error(error_msg)
+        return {"status": "error", "message": error_msg, "request_id": request_id if request_id else "unknown"}
+    finally:
+        # 清理回调
+        if request_id in callbacks:
+            del callbacks[request_id]
+
+@mcp.tool()
+def send_notification(message: str) -> Dict:
+    """发送通知消息到Chrome插件"""
+    try:
+        if not message or not isinstance(message, str):
+            error_msg = "消息内容无效"
+            api_logger.error(error_msg)
+            return {"status": "error", "message": error_msg}
+            
+        notification = {
+            "type": "notification",
+            "content": message,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # 通过标准输出发送消息到插件
+        encoded_msg = encode_message(notification)
+        if not encoded_msg:
+            error_msg = "消息编码失败"
+            api_logger.error(error_msg)
+            return {"status": "error", "message": error_msg}
+            
+        send_result = send_message(encoded_msg)
+        
+        if send_result:
+            return {"status": "success", "message": "消息已发送"}
+        else:
+            return {"status": "error", "message": "消息发送失败"}
+            
+    except Exception as e:
+        error_msg = f"发送消息时出错: {str(e)}"
+        api_logger.error(error_msg)
+        return {"status": "error", "message": error_msg}
 
 def main():
     # 注册信号处理
@@ -425,13 +760,13 @@ def main():
             sys.stdout = original_stdout
             sys.stderr = original_stderr
             
-            # 启动SSE服务器线程
-            sse_logger.info("正在启动SSE服务器线程...")
-            server_thread = threading.Thread(target=start_sse_server, daemon=True)
+            # 启动API服务器线程
+            api_logger.info("正在启动API服务器线程...")
+            server_thread = threading.Thread(target=start_api_server, daemon=True)
             server_thread.start()
             
             # 等待服务器启动
-            sse_logger.info("等待SSE服务器启动...")
+            api_logger.info("等待API服务器启动...")
             time.sleep(2)
             
             # 发送启动消息
@@ -501,6 +836,11 @@ def main():
                             continue
                         elif message.get("action") == "heartbeat":
                             logger.debug("收到心跳响应")
+                            continue
+                        elif message.get("type") == "page_source_response":
+                            # 处理页面源码响应
+                            logger.info("收到页面源码响应")
+                            handle_page_source_response(message)
                             continue
                             
                     # 处理常规消息
