@@ -3,15 +3,20 @@
     "version": "1.0.1",
     "description": "Launch APP",
     "background": {
-        "scripts": ["background.js"]
+        "scripts": ["background.js"],
+        "persistent": true
     },
     "content_scripts": [
         { 
             "matches": ["http://*/*", "https://*/*", "ftp://*/*", "file://*/*", "http://localhost:*/*"],
-            "js": ["content.js"]
+            "js": ["content.js"],
+            "run_at": "document_end"
         }
     ],
-    "permissions": ["nativeMessaging", "tabs"],
+    "browser_action": {
+        "default_title": "点击重新连接本地服务或更新当前页面"
+    },
+    "permissions": ["nativeMessaging", "tabs", "background"],
     "minimum_chrome_version": "6.0.0.0",
     "manifest_version": 2
 }
