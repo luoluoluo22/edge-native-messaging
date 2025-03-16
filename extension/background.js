@@ -163,61 +163,72 @@ function getCurrentTabId() {
     });
 }
 
-// 增加一个函数用于获取当前页面内容并设置为活跃页面
+// 检查URL是否是浏览器内部页面
+function isBrowserInternalPage(url) {
+    return url.startsWith('chrome://') || 
+           url.startsWith('edge://') || 
+           url.startsWith('about:') || 
+           url.startsWith('chrome-extension://') ||
+           url.startsWith('moz-extension://');
+}
+
+// 修改设置活跃页面的函数
 async function setCurrentPageAsActive() {
     try {
-        const tabId = await getCurrentTabId();
-        if (!tabId) {
-            console.error('无法获取当前标签页ID');
-            return false;
-        }
-        
-        // 获取当前标签页信息
-        return new Promise((resolve, reject) => {
-            chrome.tabs.get(tabId, function(tab) {
-                if (chrome.runtime.lastError) {
-                    console.error('获取标签页信息失败:', chrome.runtime.lastError);
+        console.log('正在获取当前标签页ID...');
+        // 修改为正确的Promise调用方式
+        return new Promise((resolve) => {
+            chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+                if (!tabs || tabs.length === 0) {
+                    console.log('未找到活动标签页');
                     resolve(false);
                     return;
                 }
                 
-                const url = tab.url;
-                const title = tab.title;
-                console.log('正在获取页面源码以设置活跃页面，URL:', url, '标题:', title);
+                const currentTab = tabs[0];
+                console.log('成功获取当前标签页:', currentTab);
+                
+                // 检查是否是浏览器内部页面
+                if (isBrowserInternalPage(currentTab.url)) {
+                    console.log('当前页面是浏览器内部页面，跳过设置活跃页面:', currentTab.url);
+                    resolve(false);
+                    return;
+                }
+                
+                // 获取页面源码
+                console.log('正在获取页面源码以设置活跃页面，URL:', currentTab.url, '标题:', currentTab.title);
                 
                 // 向内容脚本发送获取源码请求
-                chrome.tabs.sendMessage(tabId, {
-                    type: "get_page_source",
-                    request_id: "set_active_page"
+                chrome.tabs.sendMessage(currentTab.id, {
+                    type: 'get_page_source',
+                    request_id: 'set_active_page'
                 }, function(response) {
                     if (chrome.runtime.lastError) {
-                        console.error('向内容脚本发送请求失败:', chrome.runtime.lastError);
+                        console.log('向内容脚本发送请求失败:', chrome.runtime.lastError);
+                        resolve(false);
+                        return;
+                    }
+                    
+                    if (!response || !response.source_code) {
+                        console.log('内容脚本未返回有效的源码');
                         resolve(false);
                         return;
                     }
                     
                     console.log('收到内容脚本的响应:', response);
                     
-                    if (response && response.source_code) {
-                        // 发送设置活跃页面的消息到本地应用
-                        if (port === null) {
-                            console.error('无法设置活跃页面：未连接到本地应用');
-                            resolve(false);
-                            return;
-                        }
-                        
-                        console.log(`发送设置活跃页面请求，URL: ${url}, 标题: ${title}, 源码长度: ${response.source_code.length}`);
-                        port.postMessage({
-                            type: "set_active_page",
-                            url: url,
-                            title: title,
-                            html_content: response.source_code
-                        });
-                        resolve(true);
-                    } else {
-                        console.error('内容脚本未返回源码');
-                        resolve(false);
-                    }
+                    // 发送设置活跃页面请求
+                    console.log('发送设置活跃页面请求，URL:', currentTab.url, '标题:', currentTab.title, '源码长度:', response.source_code.length);
+                    
+                    // 发送到本地应用
+                    port.postMessage({
+                        type: 'set_active_page',
+                        url: currentTab.url,
+                        title: currentTab.title,
+                        html_content: response.source_code
+                    });
+                    
+                    resolve(true);
                 });
             });
         });
@@ -226,6 +237,24 @@ async function setCurrentPageAsActive() {
         return false;
     }
 }
+
+// 修改连接成功后的处理
+port.onMessage.addListener(async function(message) {
+    console.log('收到来自本地应用的消息:', message);
+    
+    if (message.type === 'system' && message.content === '初始化成功') {
+        console.log('本地应用初始化成功，尝试设置当前页面为活跃页面');
+        const result = await setCurrentPageAsActive();
+        console.log('自动设置当前页面为活跃页面:', result ? '成功' : '失败');
+    } else if (message.type === 'heartbeat') {
+        console.log('收到心跳消息，发送响应');
+        port.postMessage({
+            action: 'heartbeat',
+            timestamp: new Date().toISOString()
+        });
+    }
+    // ... existing code ...
+});
 
 // 修改连接到本地应用后的初始化流程，自动设置当前页面为活跃页面
 function connectToNativeHost(msg) {

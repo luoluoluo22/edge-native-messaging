@@ -88,7 +88,188 @@ for (let i = 1; i <= 4; i++) {
     }, false);
 }
 
-// Listen for messages from background.js
+// 提取页面有效内容的函数
+function extractPageContent() {
+    // 创建一个新的文档片段来存储处理后的内容
+    const cleanDoc = document.implementation.createHTMLDocument();
+    const cleanBody = cleanDoc.body;
+    
+    // 复制原始文档的body内容
+    const originalContent = document.body.cloneNode(true);
+    
+    // 清理函数：移除脚本和样式
+    function cleanNode(node) {
+        const nodesToRemove = [];
+        
+        // 遍历所有子节点
+        for (let child of node.children) {
+            // 移除脚本标签
+            if (child.tagName === 'SCRIPT' || 
+                child.tagName === 'STYLE' || 
+                child.tagName === 'LINK' ||
+                child.tagName === 'NOSCRIPT') {
+                nodesToRemove.push(child);
+                continue;
+            }
+            
+            // 移除隐藏元素
+            const style = window.getComputedStyle(child);
+            if (style.display === 'none' || style.visibility === 'hidden') {
+                nodesToRemove.push(child);
+                continue;
+            }
+            
+            // 移除所有内联样式和类名，但保留布局相关属性
+            child.removeAttribute('class');
+            child.removeAttribute('id');
+            
+            // 只保留布局相关的样式
+            const computedStyle = window.getComputedStyle(child);
+            const layoutStyles = {
+                display: computedStyle.display,
+                position: computedStyle.position,
+                float: computedStyle.float,
+                margin: computedStyle.margin,
+                padding: computedStyle.padding,
+                width: computedStyle.width,
+                height: computedStyle.height
+            };
+            
+            // 设置简化后的样式
+            Object.assign(child.style, layoutStyles);
+            
+            // 递归处理子元素
+            if (child.children.length > 0) {
+                cleanNode(child);
+            }
+        }
+        
+        // 移除标记的节点
+        nodesToRemove.forEach(n => n.parentNode.removeChild(n));
+    }
+    
+    // 清理内容
+    cleanNode(originalContent);
+    
+    // 将清理后的内容添加到新文档中
+    cleanBody.appendChild(originalContent);
+    
+    // 创建基本的HTML结构
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${document.title}</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; }
+        img { max-width: 100%; height: auto; }
+    </style>
+</head>
+<body>
+    ${cleanBody.innerHTML}
+</body>
+</html>`;
+    
+    return html;
+}
+
+// 处理base64数据的函数
+function processBase64Content(html) {
+    // 创建一个临时的DOM元素来解析HTML
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = html;
+    
+    // 处理所有图片元素
+    const images = tempDiv.getElementsByTagName('img');
+    for (let img of Array.from(images)) {
+        const src = img.getAttribute('src');
+        if (src && src.startsWith('data:image')) {
+            // 获取图片类型
+            const imageType = src.split(';')[0].split('/')[1];
+            // 替换为占位符
+            img.setAttribute('src', `[base64_image:${imageType}]`);
+            // 保存原始尺寸信息
+            if (img.width && img.height) {
+                img.setAttribute('data-original-size', `${img.width}x${img.height}`);
+            }
+        }
+    }
+    
+    // 处理CSS中的base64
+    const styles = tempDiv.getElementsByTagName('style');
+    for (let style of Array.from(styles)) {
+        let cssText = style.textContent;
+        // 替换CSS中的base64图片
+        cssText = cssText.replace(/url\(["']?data:image\/[^;]+;base64,[^"')]+["']?\)/g, 
+            (match) => {
+                const imageType = match.split(';')[0].split('/')[1];
+                return `url("[base64_image:${imageType}]")`;
+            }
+        );
+        style.textContent = cssText;
+    }
+    
+    // 处理内联样式中的base64
+    const elementsWithStyle = tempDiv.querySelectorAll('[style*="base64"]');
+    for (let el of Array.from(elementsWithStyle)) {
+        let styleText = el.getAttribute('style');
+        // 替换内联样式中的base64图片
+        styleText = styleText.replace(/url\(["']?data:image\/[^;]+;base64,[^"')]+["']?\)/g,
+            (match) => {
+                const imageType = match.split(';')[0].split('/')[1];
+                return `url("[base64_image:${imageType}]")`;
+            }
+        );
+        el.setAttribute('style', styleText);
+    }
+    
+    return tempDiv.innerHTML;
+}
+
+// 修改获取页面源码的函数
+async function getPageSource() {
+    try {
+        let html;
+        // 尝试获取原始HTML
+        try {
+            const response = await fetch(window.location.href);
+            html = await response.text();
+        } catch (error) {
+            console.log('获取原始HTML失败，使用DOM方式:', error);
+            html = document.documentElement.outerHTML;
+        }
+        
+        // 处理HTML中的base64内容
+        console.log('开始处理base64内容...');
+        const processedHtml = processBase64Content(html);
+        
+        // 构建完整的HTML文档
+        const finalHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${document.title}</title>
+    <!-- Base64 images have been replaced with placeholders -->
+</head>
+<body>
+    ${processedHtml}
+</body>
+</html>`;
+        
+        console.log('页面源码处理完成，已替换base64内容');
+        return finalHtml;
+        
+    } catch (error) {
+        console.error('处理页面源码时出错:', error);
+        return document.documentElement.outerHTML;
+    }
+}
+
+// 修改消息监听器中的页面源码获取部分
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     console.log('内容脚本收到消息:', request);
     
@@ -104,23 +285,26 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     if (typeof request === 'object' && request.type === 'get_page_source') {
         console.log('收到获取页面源码请求，ID:', request.request_id);
         
-        try {
-            // 获取页面的完整HTML
-            const html = document.documentElement.outerHTML;
-            console.log(`获取到页面源码，长度: ${html.length}`);
+        // 使用异步方式获取页面源码
+        getPageSource().then(html => {
+            const stats = {
+                originalLength: html.length,
+                base64Count: (html.match(/\[base64_image:/g) || []).length
+            };
+            console.log(`获取到页面源码，长度: ${stats.originalLength}, 替换的base64图片数: ${stats.base64Count}`);
             
-            // 发送源码回背景脚本
             sendResponse({
                 source_code: html,
-                request_id: request.request_id
+                request_id: request.request_id,
+                stats: stats
             });
-        } catch (error) {
+        }).catch(error => {
             console.error('获取页面源码时出错:', error);
             sendResponse({
                 error: error.message,
                 request_id: request.request_id
             });
-        }
+        });
         
         return true; // 保持消息通道开放，以便异步响应
     }

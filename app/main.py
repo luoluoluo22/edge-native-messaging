@@ -697,15 +697,20 @@ async def handle_get_current_tab_markdown(request):
         api_logger.info(f"收到获取当前标签页Markdown请求，ID: {request_id}")
         
         # 获取当前页面源码
+        api_logger.info(f"开始获取当前标签页源码，ID: {request_id}")
         page_source_result = get_page_source(request_id)
+        
+        # 详细记录获取结果
+        api_logger.info(f"获取页面源码结果: {page_source_result.get('status')}, ID: {request_id}")
         
         if page_source_result.get("status") != "success":
             error_msg = page_source_result.get("message", "获取页面源码失败")
-            api_logger.error(f"获取页面源码失败: {error_msg}")
+            api_logger.error(f"获取页面源码失败: {error_msg}, ID: {request_id}")
             return JSONResponse({
                 "status": "error",
                 "message": error_msg,
-                "request_id": request_id
+                "request_id": request_id,
+                "error_details": page_source_result
             }, status_code=500)
         
         # 成功获取源码，开始转换为Markdown
@@ -713,16 +718,28 @@ async def handle_get_current_tab_markdown(request):
         url = page_source_result.get("url", "未知URL")
         
         if not source_code:
-            api_logger.error("获取到的页面源码为空")
+            error_msg = "获取到的页面源码为空"
+            api_logger.error(f"{error_msg}, ID: {request_id}")
             return JSONResponse({
                 "status": "error",
-                "message": "获取到的页面源码为空",
-                "request_id": request_id
+                "message": error_msg,
+                "request_id": request_id,
+                "url": url
             }, status_code=500)
         
         # 转换为Markdown
-        api_logger.info(f"开始转换为Markdown，ID: {request_id}, URL: {url}")
-        markdown = convert_html_to_markdown(source_code)
+        api_logger.info(f"开始转换为Markdown，ID: {request_id}, URL: {url}, 源码长度: {len(source_code)}")
+        try:
+            markdown = convert_html_to_markdown(source_code)
+        except Exception as e:
+            error_msg = f"HTML转换Markdown失败: {str(e)}"
+            api_logger.error(f"{error_msg}, ID: {request_id}")
+            return JSONResponse({
+                "status": "error",
+                "message": error_msg,
+                "request_id": request_id,
+                "url": url
+            }, status_code=500)
         
         # 保存结果到全局存储
         page_sources[request_id] = {
@@ -747,10 +764,11 @@ async def handle_get_current_tab_markdown(request):
         
     except Exception as e:
         error_msg = f"获取当前标签页Markdown时出错: {str(e)}"
-        api_logger.error(error_msg)
+        api_logger.error(f"{error_msg}, ID: {request_id if 'request_id' in locals() else 'unknown'}")
         return JSONResponse({
             "status": "error",
-            "message": error_msg
+            "message": error_msg,
+            "request_id": request_id if 'request_id' in locals() else "unknown"
         }, status_code=500)
 
 # 创建路由
@@ -840,52 +858,75 @@ def get_page_source(request_id: str = None) -> Dict:
         # 注册回调
         callbacks[request_id] = handle_response
         
-        # 通过标准输出发送消息到插件
-        encoded_msg = encode_message(request_message)
-        if not encoded_msg:
-            return {
-                "status": "error",
-                "message": "请求消息编码失败",
-                "request_id": request_id
-            }
+        try:
+            # 通过标准输出发送消息到插件
+            encoded_msg = encode_message(request_message)
+            if not encoded_msg:
+                return {
+                    "status": "error",
+                    "message": "请求消息编码失败",
+                    "request_id": request_id
+                }
+                
+            send_result = send_message(encoded_msg)
             
-        send_result = send_message(encoded_msg)
-        
-        if not send_result:
-            return {
-                "status": "error", 
-                "message": "页面源码请求发送失败", 
-                "request_id": request_id
-            }
-        
-        # 发送通知
-        logger.info(f"页面源码请求已发送，等待响应，ID: {request_id}")
-        
-        # 等待响应，最多等待60秒
-        if response_event.wait(60):
-            response = response_data["response"]
-            return {
-                "status": "success",
-                "message": "成功获取页面源码",
-                "request_id": request_id,
-                "url": response.get("url", "unknown"),
-                "source_code": response.get("source_code", "")
-            }
-        else:
-            return {
-                "status": "timeout",
-                "message": "等待页面源码响应超时",
-                "request_id": request_id
-            }
+            if not send_result:
+                return {
+                    "status": "error", 
+                    "message": "页面源码请求发送失败", 
+                    "request_id": request_id
+                }
+            
+            # 发送通知
+            logger.info(f"页面源码请求已发送，等待响应，ID: {request_id}")
+            
+            # 等待响应，最多等待60秒
+            if response_event.wait(60):
+                response = response_data["response"]
+                
+                # 检查响应中是否包含错误信息
+                if "error" in response:
+                    return {
+                        "status": "error",
+                        "message": response["error"],
+                        "request_id": request_id
+                    }
+                
+                # 检查是否包含必要的源码
+                if "source_code" not in response:
+                    return {
+                        "status": "error",
+                        "message": "响应中缺少页面源码",
+                        "request_id": request_id
+                    }
+                
+                return {
+                    "status": "success",
+                    "message": "成功获取页面源码",
+                    "request_id": request_id,
+                    "url": response.get("url", "unknown"),
+                    "source_code": response["source_code"]
+                }
+            else:
+                return {
+                    "status": "timeout",
+                    "message": "等待页面源码响应超时",
+                    "request_id": request_id
+                }
+                
+        finally:
+            # 清理回调
+            if request_id in callbacks:
+                del callbacks[request_id]
             
     except Exception as e:
         error_msg = f"请求页面源码时出错: {str(e)}"
         logger.error(error_msg)
-        return {"status": "error", "message": error_msg, "request_id": request_id if request_id else "unknown"}
-    finally:
-        # 清理回调
-        if request_id in callbacks:
-            del callbacks[request_id]
+        return {
+            "status": "error", 
+            "message": error_msg, 
+            "request_id": request_id if request_id else "unknown"
+        }
 
 def main():
     # 注册信号处理

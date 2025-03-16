@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 import requests
@@ -41,8 +40,7 @@ def test_get_current_tab_markdown():
             data = response.json()
             if data.get("status") == "success":
                 # 可以选择将完整的Markdown保存到文件
-                save_to_file = input("\n是否保存完整Markdown到文件？(y/n): ").strip().lower() == 'y'
-                if save_to_file and "markdown" in data:
+                if "markdown" in data:
                     import time
                     filename = f"current_tab_markdown_{int(time.time())}.md"
                     with open(filename, "w", encoding="utf-8") as f:
@@ -61,27 +59,9 @@ def test_get_current_tab_markdown():
         print(f"测试获取当前标签页Markdown时出错: {str(e)}")
         return False
 
-def test_api_status():
-    """测试API服务状态"""
-    print("\n===== 测试API服务状态 =====")
-    try:
-        response = requests.get(API_URL)
-        print_response(response)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"测试API服务状态时出错: {str(e)}")
-        return False
 
 if __name__ == "__main__":
     print("开始测试API...")
     
-    # 先测试API服务状态
-    api_available = test_api_status()
-    
-    if api_available:
-        # 测试获取当前标签页Markdown内容
-        test_get_current_tab_markdown()
-    else:
-        print("\n无法连接到API服务，请确保服务正在运行。")
-    
+    test_get_current_tab_markdown()
     print("\n测试完成。") 
